@@ -6,18 +6,21 @@
 # ]
 # ///
 import asyncio
-import sanic
 import os
 import secrets
 
+import sanic
 from datastar_py.sanic import (
     ServerSentEventGenerator as SSE,
+)
+from datastar_py.sanic import (
     datastar_response,
     read_signals,
 )
+
 app = sanic.Sanic("Jotter")
 
-HTML = '''<!doctype html>
+HTML = """<!doctype html>
 <html lang="en">
     <head>
         <meta charset="UTF-8" />
@@ -77,48 +80,39 @@ HTML = '''<!doctype html>
             placeholder="Start typing..."
         >{{JOT}}</textarea>
     </body>
-</html>'''
+</html>"""
 
-jot_secret_path = os.environ.get("JOT_SECRET_PATH", ".jotsecret")
-base_url = os.environ.get("BASE_URL", "https://localhost:8000")
-jot_file_path = os.environ.get("JOT_FILE_PATH", "jot.txt")
+dir_ = os.environ.get("JOT_DIR", "jots")
+port_ = os.environ.get("JOT_PORT", "8000")
+host_ = os.environ.get("JOT_HOST", "localhost")
 
-def get_or_create_token():
-    """Get existing token or create a new one on first visit"""
-    if not os.path.exists(jot_secret_path):
-        jot_secret = secrets.token_urlsafe(32)
-        with open(jot_secret_path, "w") as f:
-            f.write(jot_secret)
-        return jot_secret
-    else:
-        with open(jot_secret_path, "r") as f:
-            return f.read()
 
 def get_default_jot_content(token: str) -> str:
     """Generate default content with the current token"""
-    return f'''Welcome to Jotter!
+    return f"""Welcome to Jotter!
 
 Make sure to save the link below, it's the only way to access this website:
 
-{base_url}/?token={token}
+http://{host_}{":" + port_ if port_ else ""}/?token={token}
 
-If you want to "log out" of jotter, simply clear your browser's cookies.'''
+If you want to "log out" of jotter, simply clear your browser's cookies."""
+
 
 @app.on_request
 async def check_token(req: sanic.Request):
-    query_token = req.args.get("token")
-    cookie_token = req.cookies.get("token")
+    token = req.args.get("token") or req.cookies.get("token")
 
-    # Get or create token (lazy initialization)
-    jot_secret = get_or_create_token()
+    if os.path.exists(f"{dir_}/jot_{token}.txt"):
+        if req.args.get("newuser") == "1":
+            token = secrets.token_urlsafe(32)
+        req.ctx.token = token
 
-    if query_token and query_token == jot_secret:
-        req.ctx.token = query_token
-    elif cookie_token and cookie_token == jot_secret:
-        req.ctx.token = cookie_token
     else:
-        req.ctx.token = False
-        raise sanic.Forbidden("Invalid token")
+        if not os.path.exists(dir_):
+            token = secrets.token_urlsafe(32)
+            req.ctx.token = token
+        else:
+            return sanic.text("Invalid token")
 
 
 @app.on_response
@@ -126,21 +120,24 @@ async def save_token(request: sanic.Request, response: sanic.HTTPResponse):
     if request.ctx.token:
         response.add_cookie("token", request.ctx.token)
 
-@app.get("/")
-async def index(req: sanic.Request, ):
-    # Initialize jot file with current token if it doesn't exist
-    if not os.path.exists(jot_file_path):
-        token = get_or_create_token()
-        default_content = get_default_jot_content(token)
-        with open(jot_file_path, "w") as f:
-            f.write(default_content)
 
+@app.get("/")
+async def index(
+    req: sanic.Request,
+):
     if req.args.get("token"):
         return sanic.redirect("/")
 
-    with open(jot_file_path, "r") as f:
+    token = req.ctx.token
+    fname = f"{dir_}/jot_{token}.txt"
+    if not os.path.exists(dir_):
+        os.makedirs(dir_, exist_ok=True)
+        with open(fname, "w") as f:
+            f.write(get_default_jot_content(token))
+    with open(fname, "r") as f:
         jot = f.read()
-    return sanic.html(HTML.replace("{{JOT}}", jot))
+        return sanic.html(HTML.replace("{{JOT}}", jot))
+
 
 @app.post("/write")
 async def write(req: sanic.Request):
@@ -153,6 +150,7 @@ async def write(req: sanic.Request):
         return sanic.HTTPResponse(status=201)
     except Exception as e:
         return sanic.HTTPResponse(f"Error: {str(e)}", status=500)
+
 
 @app.get("/updates")
 @datastar_response
@@ -179,5 +177,6 @@ async def updates(req: sanic.Request):
 
         await asyncio.sleep(0.1)  # Check every 100ms
 
+
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8000)
+    app.run(host=host_, port=int(port_))
