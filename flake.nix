@@ -49,7 +49,7 @@
             cp main.py $out/share/jotter/
             cat > $out/bin/jotter <<EOF
             #!${pkgs.bash}/bin/bash
-            exec ${pyEnv}/bin/python \$out/share/jotter/main.py "\$@"
+            exec ${pyEnv}/bin/python $out/share/jotter/main.py "\$@"
             EOF
             chmod +x $out/bin/jotter
           '';
