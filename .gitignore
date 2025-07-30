@@ -10,7 +10,5 @@ wheels/
 .venv
 
 # Note files
+jots/
 *.txt
-
-# Secrets
-.jotsecret

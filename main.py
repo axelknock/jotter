@@ -72,7 +72,7 @@ HTML = """<!doctype html>
             }
         </style>
     </head>
-    <body data-on-load="@get('/updates')">
+    <body data-on-load="@get('/updates', {filterSignals: {exclude: /jot/}})">
         <textarea
             id="jot-field"
             data-bind-jot
@@ -86,6 +86,7 @@ dir_ = os.environ.get("JOT_DIR", "jots")
 port_ = os.environ.get("JOT_PORT", "8000")
 host_ = os.environ.get("JOT_HOST", "localhost")
 
+os.makedirs(dir_, exist_ok=True)
 
 def get_default_jot_content(token: str) -> str:
     """Generate default content with the current token"""
@@ -95,6 +96,12 @@ Make sure to save the link below, it's the only way to access this website:
 
 http://{host_}{":" + port_ if port_ else ""}/?token={token}
 
+To add a new user, use this link:
+
+http://{host_}{":" + port_ if port_ else ""}/?token={token}&newuser=1
+
+*CAUTION*: Using this link in the same browser as an existing session will log out the original session.
+
 If you want to "log out" of jotter, simply clear your browser's cookies."""
 
 
@@ -102,72 +109,79 @@ If you want to "log out" of jotter, simply clear your browser's cookies."""
 async def check_token(req: sanic.Request):
     token = req.args.get("token") or req.cookies.get("token")
 
-    if os.path.exists(f"{dir_}/jot_{token}.txt"):
+    if not token:
+        for fname in os.listdir(dir_):
+            if fname.startswith("jot_"):
+                return sanic.text("Token required")
+        token = secrets.token_urlsafe(32)
+        req.ctx.token = token
+    elif os.path.exists(f"{dir_}/jot_{token}.txt"):
         if req.args.get("newuser") == "1":
             token = secrets.token_urlsafe(32)
         req.ctx.token = token
 
     else:
-        if not os.path.exists(dir_):
-            token = secrets.token_urlsafe(32)
-            req.ctx.token = token
-        else:
-            return sanic.text("Invalid token")
+        return sanic.text("Invalid token")
 
-
-@app.on_response
-async def save_token(request: sanic.Request, response: sanic.HTTPResponse):
-    if request.ctx.token:
-        response.add_cookie("token", request.ctx.token)
-
+# @app.on_response
+# async def remove_token(req: sanic.Request, resp: sanic.HTTPResponse):
+#     if req.args.get("token"):
+#         return sanic.redirect("/")
 
 @app.get("/")
 async def index(
     req: sanic.Request,
 ):
-    if req.args.get("token"):
-        return sanic.redirect("/")
-
     token = req.ctx.token
     fname = f"{dir_}/jot_{token}.txt"
-    if not os.path.exists(dir_):
-        os.makedirs(dir_, exist_ok=True)
+    if not os.path.exists(fname):
         with open(fname, "w") as f:
             f.write(get_default_jot_content(token))
     with open(fname, "r") as f:
         jot = f.read()
-        return sanic.html(HTML.replace("{{JOT}}", jot))
+        response = sanic.html(HTML.replace("{{JOT}}", jot))
+        response.add_cookie("token", token)
+        return response
 
 
 @app.post("/write")
 async def write(req: sanic.Request):
-    try:
-        signals = await read_signals(req)
-        jot = signals.get("jot", "") if signals else ""
+    token = req.ctx.token
+    fname = f"{dir_}/jot_{token}.txt"
+    signals = await read_signals(req)
+    jot = signals.get("jot", "") if signals else ""
 
-        with open(jot_file_path, "w") as f:
-            f.write(jot)
-        return sanic.HTTPResponse(status=201)
-    except Exception as e:
-        return sanic.HTTPResponse(f"Error: {str(e)}", status=500)
+    with open(fname, "w") as f:
+        f.write(jot)
+    return sanic.HTTPResponse(status=204)
 
 
 @app.get("/updates")
 @datastar_response
 async def updates(req: sanic.Request):
     last_modified = None
+    token = req.ctx.token
+    fname = f"{dir_}/jot_{token}.txt"
 
     # Send initial content
-    with open(jot_file_path, "r") as f:
+    with open(fname, "r") as f:
         jot = f.read()
-    last_modified = os.path.getmtime(jot_file_path)
+    last_modified = os.path.getmtime(fname)
     yield SSE.patch_signals({"jot": jot})
+    yield SSE.execute_script('''
+        if (window.location.search.includes('token=')) {
+            const url = new URL(window.location);
+            url.searchParams.delete('token');
+            url.searchParams.delete('newuser'); // Also remove newuser param if present
+            window.history.replaceState({}, '', url.pathname + url.search);
+        }
+        ''')
 
     while True:
         try:
-            current_modified = os.path.getmtime(jot_file_path)
+            current_modified = os.path.getmtime(fname)
             if current_modified != last_modified:
-                with open(jot_file_path, "r") as f:
+                with open(fname, "r") as f:
                     jot = f.read()
                 yield SSE.patch_signals({"jot": jot})
                 last_modified = current_modified
