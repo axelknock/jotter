@@ -100,7 +100,7 @@ To add a new user, use this link:
 
 http://{host_}{":" + port_ if port_ else ""}/?token={token}&newuser=1
 
-*CAUTION*: Using this link in the same browser as an existing session will log out the original session.
+*CAUTION*: Using this link in the same browser as an existing session will log out the original session. Make sure you save the token!
 
 If you want to "log out" of jotter, simply clear your browser's cookies."""
 
@@ -122,11 +122,6 @@ async def check_token(req: sanic.Request):
 
     else:
         return sanic.text("Invalid token")
-
-# @app.on_response
-# async def remove_token(req: sanic.Request, resp: sanic.HTTPResponse):
-#     if req.args.get("token"):
-#         return sanic.redirect("/")
 
 @app.get("/")
 async def index(
@@ -167,7 +162,11 @@ async def updates(req: sanic.Request):
     with open(fname, "r") as f:
         jot = f.read()
     last_modified = os.path.getmtime(fname)
-    yield SSE.patch_signals({"jot": jot})
+    yield SSE.patch_elements(f'''<textarea id="jot-field"
+        id="jot-field"
+        data-bind-jot
+        data-on-input__debounce.400ms="@post('/write')"
+        placeholder="Start typing...">{jot}</textarea>''')
     yield SSE.execute_script('''
         if (window.location.search.includes('token=')) {
             const url = new URL(window.location);
@@ -183,7 +182,11 @@ async def updates(req: sanic.Request):
             if current_modified != last_modified:
                 with open(fname, "r") as f:
                     jot = f.read()
-                yield SSE.patch_signals({"jot": jot})
+                yield SSE.patch_elements(f'''<textarea id="jot-field"
+                    id="jot-field"
+                    data-bind-jot
+                    data-on-input__debounce.400ms="@post('/write')"
+                    placeholder="Start typing...">{jot}</textarea>''')
                 last_modified = current_modified
         except FileNotFoundError:
             # File was deleted, wait for it to be recreated
