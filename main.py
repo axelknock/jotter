@@ -8,6 +8,7 @@
 import asyncio
 import os
 import secrets
+import uuid
 
 import sanic
 from datastar_py.sanic import (
@@ -88,6 +89,9 @@ host_ = os.environ.get("JOT_HOST", "localhost")
 
 os.makedirs(dir_, exist_ok=True)
 
+last_writers = {}
+
+
 def get_default_jot_content(token: str) -> str:
     """Generate default content with the current token"""
     return f"""Welcome to Jotter!
@@ -123,6 +127,13 @@ async def check_token(req: sanic.Request):
     else:
         return sanic.text("Invalid token")
 
+
+@app.on_response
+async def ensure_session(req: sanic.Request, resp: sanic.HTTPResponse):
+    if not req.cookies.get("id"):
+        resp.add_cookie("id", str(uuid.uuid4()))
+
+
 @app.get("/")
 async def index(
     req: sanic.Request,
@@ -142,6 +153,8 @@ async def index(
 @app.post("/write")
 async def write(req: sanic.Request):
     token = req.ctx.token
+    sess = req.cookies.get("id")
+    last_writers[token] = sess
     fname = f"{dir_}/jot_{token}.txt"
     signals = await read_signals(req)
     jot = signals.get("jot", "") if signals else ""
@@ -157,37 +170,41 @@ async def updates(req: sanic.Request):
     last_modified = None
     token = req.ctx.token
     fname = f"{dir_}/jot_{token}.txt"
+    sess = req.cookies.get("id")
 
     # Send initial content
     with open(fname, "r") as f:
         jot = f.read()
     last_modified = os.path.getmtime(fname)
-    yield SSE.patch_elements(f'''<textarea id="jot-field"
-        id="jot-field"
-        data-bind-jot
-        data-on-input__debounce.400ms="@post('/write')"
-        placeholder="Start typing...">{jot}</textarea>''')
-    yield SSE.execute_script('''
+    yield SSE.execute_script("""
         if (window.location.search.includes('token=')) {
             const url = new URL(window.location);
             url.searchParams.delete('token');
             url.searchParams.delete('newuser'); // Also remove newuser param if present
             window.history.replaceState({}, '', url.pathname + url.search);
         }
-        ''')
+        """)
+    yield SSE.patch_elements(f"""<textarea id="jot-field"
+        id="jot-field"
+        data-bind-jot
+        data-on-input__debounce.400ms="@post('/write')"
+        placeholder="Start typing...">{jot}</textarea>""")
 
     while True:
         try:
             current_modified = os.path.getmtime(fname)
             if current_modified != last_modified:
-                with open(fname, "r") as f:
-                    jot = f.read()
-                yield SSE.patch_elements(f'''<textarea id="jot-field"
-                    id="jot-field"
-                    data-bind-jot
-                    data-on-input__debounce.400ms="@post('/write')"
-                    placeholder="Start typing...">{jot}</textarea>''')
-                last_modified = current_modified
+                if last_writers.get(token) == sess:
+                    last_modified = current_modified
+                else:
+                    with open(fname, "r") as f:
+                        jot = f.read()
+                    yield SSE.patch_elements(f"""<textarea id="jot-field"
+                        id="jot-field"
+                        data-bind-jot
+                        data-on-input__debounce.400ms="@post('/write')"
+                        placeholder="Start typing...">{jot}</textarea>""")
+                    last_modified = current_modified
         except FileNotFoundError:
             # File was deleted, wait for it to be recreated
             pass
