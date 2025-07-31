@@ -1,41 +1,37 @@
-FROM python:3.13-slim
+FROM golang:1.21-alpine AS builder
 
-# Set working directory
 WORKDIR /app
 
-# Set environment variables
-ENV PYTHONUNBUFFERED=1
-ENV PYTHONDONTWRITEBYTECODE=1
+# Install dependencies
+COPY go.mod go.sum ./
+RUN go mod download
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    && rm -rf /var/lib/apt/lists/*
-
-# Copy dependency files
-COPY pyproject.toml uv.lock* ./
-
-# Install uv for fast Python package management
-RUN pip install uv
-
-# Install Python dependencies
-RUN uv sync --frozen
-
-# Copy application code
+# Copy source code
 COPY . .
 
-# Create jots directory for data persistence
+# Build the application
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o jotter .
+
+FROM alpine:latest
+
+# Install ca-certificates for HTTPS requests
+RUN apk --no-cache add ca-certificates
+
+WORKDIR /app
+
+# Copy the binary from builder stage
+COPY --from=builder /app/jotter .
+
+# Create jots directory
 RUN mkdir -p /app/jots
 
 # Expose port
 EXPOSE 8000
 
-# Set default environment variables
+# Set environment variables
+ENV JOT_DIR=/app/jots
 ENV JOT_HOST=0.0.0.0
 ENV JOT_PORT=8000
-ENV JOT_DIR=/app/jots
-
-# Create volume for persistent data
-VOLUME ["/app/jots"]
 
 # Run the application
-CMD ["uv", "run", "main.py"]
+CMD ["./jotter"]
