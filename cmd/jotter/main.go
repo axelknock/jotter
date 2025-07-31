@@ -14,6 +14,8 @@ import (
 	"sync"
 	"time"
 
+	"jotter/web"
+
 	"github.com/fsnotify/fsnotify"
 	"github.com/google/uuid"
 )
@@ -24,6 +26,7 @@ const htmlTemplate = `<!doctype html>
         <meta charset="UTF-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1.0" />
         <title>jotter</title>
+        <link rel="icon" type="image/x-icon" href="/static/img/favicon.ico" />
         <style>
             * {
                 margin: 0;
@@ -263,18 +266,20 @@ func NewServer() (*Server, error) {
 func (s *Server) Start() error {
 	go s.watchFiles()
 
-	http.HandleFunc("/", s.handleIndex)
-	http.HandleFunc("/write", s.handleWrite)
-	http.HandleFunc("/updates", s.handleUpdates)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", s.handleIndex)
+	mux.HandleFunc("/write", s.handleWrite)
+	mux.HandleFunc("/updates", s.handleUpdates)
+	mux.Handle("/static/", web.StaticHandler())
 
 	addr := fmt.Sprintf("%s:%s", s.host, s.port)
 
 	if s.tlsEnabled {
 		log.Printf("Starting TLS server on https://%s", addr)
-		return http.ListenAndServeTLS(addr, s.certFile, s.keyFile, nil)
+		return http.ListenAndServeTLS(addr, s.certFile, s.keyFile, mux)
 	} else {
 		log.Printf("Starting server on http://%s", addr)
-		return http.ListenAndServe(addr, nil)
+		return http.ListenAndServe(addr, mux)
 	}
 }
 
@@ -350,6 +355,12 @@ func (s *Server) formatSSEMessage(message UpdateMessage) []byte {
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
+	// Only handle exact root path, return 404 for other paths
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
+		return
+	}
+
 	token, err := s.getOrCreateToken(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
