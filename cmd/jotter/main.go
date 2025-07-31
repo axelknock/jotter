@@ -23,7 +23,7 @@ const htmlTemplate = `<!doctype html>
     <head>
         <meta charset="UTF-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-        <title>Jotter</title>
+        <title>jotter</title>
         <style>
             * {
                 margin: 0;
@@ -46,18 +46,30 @@ const htmlTemplate = `<!doctype html>
                 resize: none;
                 padding: 20px;
                 font-family:
-                    "SF Mono", Monaco, "Cascadia Code", "Roboto Mono",
+                    Monaco, "Cascadia Code", "Roboto Mono",
                     Consolas, "Courier New", monospace;
                 font-size: 16px;
                 line-height: 1.5;
                 background-color: #ffffff;
                 color: #333333;
+                transition: opacity 0.3s ease, background-color 0.3s ease;
+            }
+
+            #jot-field.disconnected {
+                opacity: 0.5;
+                background-color: #f5f5f5;
+                pointer-events: none;
+                cursor: not-allowed;
             }
 
             @media (prefers-color-scheme: dark) {
                 #jot-field {
                     background-color: #333333;
                     color: #ffffff;
+                }
+
+                #jot-field.disconnected {
+                    background-color: #444444;
                 }
             }
 
@@ -78,8 +90,13 @@ const htmlTemplate = `<!doctype html>
             let eventSource;
             let lastWriter = '';
             let debounce = 400;
+            let isConnected = false;
+            let heartbeatTimer;
+            let heartbeatTimeout = 10000; // 10 seconds (5s + 5s buffer)
 
             function handleInput() {
+                if (!isConnected) return;
+
                 const content = document.getElementById('jot-field').value;
                 clearTimeout(debounceTimer);
                 debounceTimer = setTimeout(() => {
@@ -93,20 +110,66 @@ const htmlTemplate = `<!doctype html>
                 }, debounce);
             }
 
+            function setConnectionState(connected) {
+                isConnected = connected;
+                const textarea = document.getElementById('jot-field');
+                if (connected) {
+                    textarea.classList.remove('disconnected');
+                    textarea.placeholder = 'Start typing...';
+                } else {
+                    textarea.classList.add('disconnected');
+                    textarea.placeholder = 'Disconnected - trying to reconnect...';
+                }
+            }
+
+            function resetHeartbeatTimer() {
+                clearTimeout(heartbeatTimer);
+                heartbeatTimer = setTimeout(() => {
+                    console.log('Heartbeat timeout - connection lost');
+                    setConnectionState(false);
+                    if (eventSource) {
+                        eventSource.close();
+                    }
+                    setTimeout(connectSSE, 1000);
+                }, heartbeatTimeout);
+            }
+
             function connectSSE() {
+                if (eventSource) {
+                    eventSource.close();
+                }
+
                 eventSource = new EventSource('/updates');
 
+                eventSource.onopen = function() {
+                    console.log('SSE connection established');
+                    setConnectionState(true);
+                    resetHeartbeatTimer();
+                };
+
                 eventSource.onmessage = function(event) {
-                    const data = JSON.parse(event.data);
-                    if (data.type === 'content_update' && data.writer !== getSessionId()) {
-                        const textarea = document.getElementById('jot-field');
-                        textarea.value = data.content;
+                    // Reset heartbeat timer on any message
+                    resetHeartbeatTimer();
+
+                    // Process data messages
+                    if (event.data && event.data.trim() !== '') {
+                        try {
+                            const data = JSON.parse(event.data);
+                            if (data.type === 'content_update' && data.writer !== getSessionId()) {
+                                const textarea = document.getElementById('jot-field');
+                                textarea.value = data.content;
+                            }
+                            // Heartbeat messages are handled by just resetting the timer above
+                        } catch (e) {
+                            console.log('Error parsing SSE message:', e);
+                        }
                     }
                 };
 
                 eventSource.onerror = function() {
-                    console.log('SSE connection lost, reconnecting...');
-                    setTimeout(connectSSE, 1000);
+                    console.log('SSE error occurred');
+                    clearTimeout(heartbeatTimer);
+                    // Don't immediately reconnect - let heartbeat timeout handle it
                 };
             }
 
@@ -126,6 +189,8 @@ const htmlTemplate = `<!doctype html>
                 window.history.replaceState({}, '', url.pathname + url.search);
             }
 
+            // Initialize as disconnected until SSE connects
+            setConnectionState(false);
             connectSSE();
         </script>
     </body>
@@ -135,6 +200,9 @@ type Server struct {
 	jotDir     string
 	host       string
 	port       string
+	tlsEnabled bool
+	certFile   string
+	keyFile    string
 	watcher    *fsnotify.Watcher
 	clients    map[string]map[string]chan []byte // token -> sessionId -> channel
 	lastWriter map[string]string                 // token -> sessionId
@@ -156,6 +224,9 @@ func NewServer() (*Server, error) {
 	jotDir := getEnv("JOT_DIR", "jots")
 	host := getEnv("JOT_HOST", "localhost")
 	port := getEnv("JOT_PORT", "7086")
+	certFile := getEnv("JOT_CERT_FILE", "")
+	keyFile := getEnv("JOT_KEY_FILE", "")
+	tlsEnabled := certFile != "" && keyFile != ""
 
 	if err := os.MkdirAll(jotDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create jot directory: %w", err)
@@ -179,6 +250,9 @@ func NewServer() (*Server, error) {
 		jotDir:     jotDir,
 		host:       host,
 		port:       port,
+		tlsEnabled: tlsEnabled,
+		certFile:   certFile,
+		keyFile:    keyFile,
 		watcher:    watcher,
 		clients:    make(map[string]map[string]chan []byte),
 		lastWriter: make(map[string]string),
@@ -194,8 +268,14 @@ func (s *Server) Start() error {
 	http.HandleFunc("/updates", s.handleUpdates)
 
 	addr := fmt.Sprintf("%s:%s", s.host, s.port)
-	log.Printf("Starting server on http://%s", addr)
-	return http.ListenAndServe(addr, nil)
+
+	if s.tlsEnabled {
+		log.Printf("Starting TLS server on https://%s", addr)
+		return http.ListenAndServeTLS(addr, s.certFile, s.keyFile, nil)
+	} else {
+		log.Printf("Starting server on http://%s", addr)
+		return http.ListenAndServe(addr, nil)
+	}
 }
 
 func (s *Server) watchFiles() {
@@ -393,8 +473,14 @@ func (s *Server) handleUpdates(w http.ResponseWriter, r *http.Request) {
 		close(clientChan)
 	}()
 
-	// Send initial message to detect if connection is working
-	if _, err := w.Write([]byte(": connected\n\n")); err != nil {
+	// Send initial connection message
+	initialMsg := UpdateMessage{
+		Type:    "connected",
+		Content: "",
+		Writer:  "",
+	}
+	initialBytes := s.formatSSEMessage(initialMsg)
+	if _, err := w.Write(initialBytes); err != nil {
 		return
 	}
 	if f, ok := w.(http.Flusher); ok {
@@ -402,19 +488,14 @@ func (s *Server) handleUpdates(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Send keep-alive and handle client messages
-	ticker := time.NewTicker(30 * time.Second)
+	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
-
-	// Add a short timeout for testing purposes - real apps would use longer timeouts
-	timeout := time.NewTimer(10 * time.Millisecond)
-	defer timeout.Stop()
 
 	for {
 		select {
 		case <-r.Context().Done():
 			return
 		case message := <-clientChan:
-			timeout.Reset(10 * time.Millisecond) // Reset timeout on activity
 			if _, err := w.Write(message); err != nil {
 				return
 			}
@@ -422,16 +503,19 @@ func (s *Server) handleUpdates(w http.ResponseWriter, r *http.Request) {
 				f.Flush()
 			}
 		case <-ticker.C:
-			// Send keep-alive and check if write fails
-			if _, err := w.Write([]byte(": keep-alive\n\n")); err != nil {
+			// Send keep-alive data message
+			keepAlive := UpdateMessage{
+				Type:    "heartbeat",
+				Content: "",
+				Writer:  "",
+			}
+			messageBytes := s.formatSSEMessage(keepAlive)
+			if _, err := w.Write(messageBytes); err != nil {
 				return
 			}
 			if f, ok := w.(http.Flusher); ok {
 				f.Flush()
 			}
-		case <-timeout.C:
-			// Connection has been inactive for too long
-			return
 		}
 	}
 }
@@ -488,20 +572,25 @@ func (s *Server) generateToken() (string, error) {
 }
 
 func (s *Server) getDefaultContent(token string) string {
+	scheme := "http"
+	if s.tlsEnabled {
+		scheme = "https"
+	}
+
 	return fmt.Sprintf(`Welcome to Jotter!
 
 Make sure to save the link below, it's the only way to access this website:
 
-http://%s:%s/?token=%s
+%s://%s:%s/?token=%s
 
 To add a new user, use this link:
 
-http://%s:%s/?token=%s&new=1
+%s://%s:%s/?token=%s&new=1
 
 *CAUTION*: Using this link in the same browser as an existing session will log out the original session. Make sure you save the token!
 
 If you want to "log out" of jotter, simply clear your browser's cookies.`,
-		s.host, s.port, token, s.host, s.port, token)
+		scheme, s.host, s.port, token, scheme, s.host, s.port, token)
 }
 
 func decodeJSON(r io.Reader, v any) error {

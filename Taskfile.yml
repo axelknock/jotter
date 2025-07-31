@@ -1,0 +1,62 @@
+version: "3"
+
+tasks:
+  gen-certs:
+    desc: Generate self-signed TLS certificates for development
+    vars:
+      DOMAIN: '{{.DOMAIN | default "localhost"}}'
+      CERT_DIR: certs
+      CERT_FILE: certs/server.crt
+      KEY_FILE: certs/server.key
+    cmds:
+      - mkdir -p {{.CERT_DIR}}
+      - |
+        echo "Generating self-signed TLS certificate for domain: {{.DOMAIN}}"
+        openssl genrsa -out {{.KEY_FILE}} 2048
+        openssl req -new -x509 -key {{.KEY_FILE}} -out {{.CERT_FILE}} -days 365 \
+          -subj "/C=US/ST=State/L=City/O=Organization/CN={{.DOMAIN}}" \
+          -addext "subjectAltName=DNS:{{.DOMAIN}},DNS:localhost,IP:127.0.0.1"
+        echo "Certificate generated successfully!"
+        echo "Certificate: {{.CERT_FILE}}"
+        echo "Private Key: {{.KEY_FILE}}"
+        echo ""
+        echo "To run Jotter with TLS, set these environment variables:"
+        echo "export JOT_CERT_FILE=$(pwd)/{{.CERT_FILE}}"
+        echo "export JOT_KEY_FILE=$(pwd)/{{.KEY_FILE}}"
+
+  dev:
+    desc: Run development server with TLS (default)
+    deps: [gen-certs]
+    env:
+      JOT_CERT_FILE: certs/server.crt
+      JOT_KEY_FILE: certs/server.key
+      JOT_HOST: localhost
+      JOT_PORT: 8443
+      JOT_DIR: jots
+    cmds:
+      - |
+        echo "Starting Jotter development server with TLS..."
+        echo "Server will be available at: https://localhost:8443"
+        echo "Note: You may need to accept the self-signed certificate warning in your browser"
+        go run cmd/jotter/main.go
+
+  build-docker:
+    desc: Build Docker image for Jotter
+    vars:
+      IMAGE_NAME: '{{.IMAGE_NAME | default "jotter"}}'
+      TAG: '{{.TAG | default "latest"}}'
+    cmds:
+      - docker build -t {{.IMAGE_NAME}}:{{.TAG}} .
+      - |
+        echo "Docker image built successfully: {{.IMAGE_NAME}}:{{.TAG}}"
+        echo ""
+        echo "To run with HTTP:"
+        echo "docker run -d -p 8000:8000 -v /path/to/jots:/app/jots {{.IMAGE_NAME}}:{{.TAG}}"
+        echo ""
+        echo "To run with TLS (generate certificates first with 'task gen-certs'):"
+        echo "docker run -d -p 8443:8000 \\"
+        echo "  -v $(pwd)/certs:/app/certs \\"
+        echo "  -e JOT_CERT_FILE=/app/certs/server.crt \\"
+        echo "  -e JOT_KEY_FILE=/app/certs/server.key \\"
+        echo "  -v /path/to/jots:/app/jots \\"
+        echo "  {{.IMAGE_NAME}}:{{.TAG}}"

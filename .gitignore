@@ -12,3 +12,6 @@ wheels/
 # Note files
 jots/
 *.txt
+
+# Generated tls certificates
+certs/
