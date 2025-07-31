@@ -268,6 +268,7 @@ func (s *Server) Start() error {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handleIndex)
+	mux.HandleFunc("/new", s.handleNew)
 	mux.HandleFunc("/write", s.handleWrite)
 	mux.HandleFunc("/updates", s.handleUpdates)
 	mux.Handle("/static/", web.StaticHandler())
@@ -355,7 +356,6 @@ func (s *Server) formatSSEMessage(message UpdateMessage) []byte {
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
-	// Only handle exact root path, return 404 for other paths
 	if r.URL.Path != "/" {
 		http.NotFound(w, r)
 		return
@@ -369,7 +369,6 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 
 	filename := filepath.Join(s.jotDir, fmt.Sprintf("jot_%s.txt", token))
 
-	// Create file if it doesn't exist
 	if _, err := os.Stat(filename); os.IsNotExist(err) {
 		defaultContent := s.getDefaultContent(token)
 		if err := os.WriteFile(filename, []byte(defaultContent), 0644); err != nil {
@@ -384,7 +383,6 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Set token cookie
 	http.SetCookie(w, &http.Cookie{
 		Name:     "token",
 		Value:    token,
@@ -531,15 +529,53 @@ func (s *Server) handleUpdates(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s *Server) handleNew(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	cookie, err := r.Cookie("token")
+	if err != nil {
+		http.Error(w, "No token cookie found", http.StatusBadRequest)
+		return
+	}
+
+	filename := filepath.Join(s.jotDir, fmt.Sprintf("jot_%s.txt", cookie.Value))
+	if _, err := os.Stat(filename); os.IsNotExist(err) {
+		http.Error(w, "Invalid token", http.StatusBadRequest)
+		return
+	}
+
+	newToken, err := s.generateToken()
+	if err != nil {
+		http.Error(w, "Failed to generate new token", http.StatusInternalServerError)
+		return
+	}
+
+	newFilename := filepath.Join(s.jotDir, fmt.Sprintf("jot_%s.txt", newToken))
+	defaultContent := s.getDefaultContentWithBackReference(newToken, cookie.Value)
+	if err := os.WriteFile(newFilename, []byte(defaultContent), 0644); err != nil {
+		http.Error(w, "Failed to create new jot file", http.StatusInternalServerError)
+		return
+	}
+
+	http.SetCookie(w, &http.Cookie{
+		Name:     "token",
+		Value:    newToken,
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+	})
+
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
 func (s *Server) getOrCreateToken(r *http.Request) (string, error) {
 	// Check URL parameter first
 	if token := r.URL.Query().Get("token"); token != "" {
 		filename := filepath.Join(s.jotDir, fmt.Sprintf("jot_%s.txt", token))
 		if _, err := os.Stat(filename); err == nil {
-			// Token exists, check if new flag is set
-			if r.URL.Query().Get("new") == "1" {
-				return s.generateToken()
-			}
 			return token, nil
 		}
 		return "", fmt.Errorf("invalid token")
@@ -588,20 +624,44 @@ func (s *Server) getDefaultContent(token string) string {
 		scheme = "https"
 	}
 
-	return fmt.Sprintf(`Welcome to Jotter!
+	return fmt.Sprintf(`Welcome to jotter!
+
+Make sure to save the link below, it's the only way to access this jot (go to it once and it will show up in your browser's history):
+
+%s://%s:%s/?token=%s
+
+To create a new jot, visit:
+
+%s://%s:%s/new
+
+*CAUTION*: Creating a new jot in the same browser will switch to the new jot session. Make sure you save the token!
+
+If you want to "log out" of jotter, simply clear your browser's cookies.`,
+		scheme, s.host, s.port, token, scheme, s.host, s.port)
+}
+
+func (s *Server) getDefaultContentWithBackReference(newToken, originalToken string) string {
+	scheme := "http"
+	if s.tlsEnabled {
+		scheme = "https"
+	}
+
+	return fmt.Sprintf(`Welcome to jotter!
+
+This jot was created from: %s://%s:%s/?token=%s
 
 Make sure to save the link below, it's the only way to access this website:
 
 %s://%s:%s/?token=%s
 
-To add a new user, use this link:
+To create a new jot, visit:
 
-%s://%s:%s/?token=%s&new=1
+%s://%s:%s/new
 
-*CAUTION*: Using this link in the same browser as an existing session will log out the original session. Make sure you save the token!
+*CAUTION*: Creating a new jot in the same browser will switch to the new jot session. Make sure you save the token!
 
 If you want to "log out" of jotter, simply clear your browser's cookies.`,
-		scheme, s.host, s.port, token, scheme, s.host, s.port, token)
+		scheme, s.host, s.port, originalToken, scheme, s.host, s.port, newToken, scheme, s.host, s.port)
 }
 
 func decodeJSON(r io.Reader, v any) error {
