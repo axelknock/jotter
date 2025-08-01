@@ -25,7 +25,7 @@ tasks:
         echo "export JOT_KEY_FILE=$(pwd)/{{.KEY_FILE}}"
 
   dev:
-    desc: Run development server with TLS (default)
+    desc: Run development server with auto-reload and TLS
     deps: [gen-certs]
     env:
       JOT_CERT_FILE: certs/server.crt
@@ -35,10 +35,11 @@ tasks:
       JOT_DIR: jots
     cmds:
       - |
-        echo "Starting Jotter development server with TLS..."
+        echo "Starting Jotter development server with auto-reload and TLS..."
         echo "Server will be available at: https://localhost:8443"
         echo "Note: You may need to accept the self-signed certificate warning in your browser"
-        go run cmd/jotter/main.go
+        echo "Auto-reload is enabled - the server will restart when Go files change"
+        air
 
   build-docker:
     desc: Build Docker image for Jotter
