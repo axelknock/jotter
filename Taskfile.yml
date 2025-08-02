@@ -26,7 +26,7 @@ tasks:
 
   dev:
     desc: Run development server with auto-reload and TLS
-    deps: [gen-certs]
+    deps: [tools, gen-certs]
     env:
       JOT_CERT_FILE: certs/server.crt
       JOT_KEY_FILE: certs/server.key
@@ -61,3 +61,9 @@ tasks:
         echo "  -e JOT_KEY_FILE=/app/certs/server.key \\"
         echo "  -v /path/to/jots:/app/jots \\"
         echo "  {{.IMAGE_NAME}}:{{.TAG}}"
+
+  tools:
+    desc: Install necessary development tools
+    cmds:
+      - go install github.com/air-verse/air@latest
+      - echo "Installed air successfully!"
