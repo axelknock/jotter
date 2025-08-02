@@ -9,7 +9,7 @@ let heartbeatTimeout = 10000; // 10 seconds (5s + 5s buffer)
 function handleInput() {
   if (!isConnected) return;
 
-  const content = document.getElementById("jot-field").value;
+  const content = document.getElementById("jot-field").innerText;
   clearTimeout(debounceTimer);
   debounceTimer = setTimeout(() => {
     fetch("/write", {
@@ -68,8 +68,8 @@ function connectSSE() {
       try {
         const data = JSON.parse(event.data);
         if (data.type === "content_update" && data.writer !== getSessionId()) {
-          const textarea = document.getElementById("jot-field");
-          textarea.value = data.content;
+          const jotField = document.getElementById("jot-field");
+          jotField.innerText = data.content;
         }
         // Heartbeat messages are handled by just resetting the timer above
       } catch (e) {
