@@ -9,7 +9,7 @@ let heartbeatTimeout = 10000; // 10 seconds (5s + 5s buffer)
 function handleInput() {
   if (!isConnected) return;
 
-  const content = document.getElementById("jot-field").innerText;
+  const content = document.getElementById("jot-field").value;
   clearTimeout(debounceTimer);
   debounceTimer = setTimeout(() => {
     fetch("/write", {
@@ -24,13 +24,13 @@ function handleInput() {
 
 function setConnectionState(connected) {
   isConnected = connected;
-  const textarea = document.getElementById("jot-field");
+  const jotField = document.getElementById("jot-field");
   if (connected) {
-    textarea.classList.remove("disconnected");
-    textarea.placeholder = "Start typing...";
+    jotField.classList.remove("disconnected");
+    jotField.placeholder = "Start typing...";
   } else {
-    textarea.classList.add("disconnected");
-    textarea.placeholder = "Disconnected - trying to reconnect...";
+    jotField.classList.add("disconnected");
+    jotField.placeholder = "Disconnected - trying to reconnect...";
   }
 }
 

@@ -30,12 +30,11 @@ const htmlTemplate = `<!doctype html>
         <link rel="stylesheet" href="/static/css/style.css">
     </head>
     <body>
-        <div
-        	contenteditable="plaintext-only"
+        <textarea
             id="jot-field"
             placeholder="Start typing..."
             oninput="handleInput()"
-        >{{.Content}}</div>
+        >{{.Content}}</textarea>
         <script src="/static/js/script.js"></script>
     </body>
 </html>`
