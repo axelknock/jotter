@@ -1,0 +1,31 @@
+## Build/Lint/Test Commands
+
+- Install deps: go mod download
+- Build: task build
+- Dev server: task dev (uses air for hot reload, generates self-signed certs)
+- Test all: task test
+- Test single: task test-single
+- Benchmark: task bench
+- Lint: task lint
+- Format: task fmt
+- Generate certs: task gen-certs
+- Build Docker: task build-docker
+
+## Code Style Guidelines
+
+- **Formatting**: Always run gofmt. Use 4-space tabs (but gofmt handles it).
+- **Imports**: Group into standard library, third-party (e.g., github.com/...), local (e.g., "jotter/web"). Alphabetize within groups. No unused imports.
+- **Naming Conventions**: Exported: UpperCamelCase (e.g., NewServer). Private: lowerCamelCase (e.g., handleIndex). Constants: UPPER_SNAKE_CASE if needed. Use descriptive names.
+- **Types**: Struct fields start with uppercase for export. Use JSON tags for structs that are serialized (e.g., `json:"type"`).
+- **Error Handling**: Wrap errors with fmt.Errorf("...: %w", err). Log warnings with log.Printf. No panics in production code.
+- **Concurrency**: Use sync.RWMutex for read-write locks on shared maps. Channels for communication.
+- **Testing**: Use testing.T for tests, httptest for HTTP handlers. Include benchmarks for performance-critical parts.
+- **File Structure**: Main package in cmd/jotter/. Embed assets with go:embed. Keep handlers concise.
+- **General**: Minimize global state. Use environment variables for config (e.g., JOT_DIR). Avoid comments unless clarifying complex logic.
+
+## Codebase Structure
+
+- cmd/jotter/: Main application entrypoint and tests.
+- web/: Embedded static assets and handler.
+- jots/: Runtime directory for note files (gitignored).
+- certs/: Generated certificates (gitignored).

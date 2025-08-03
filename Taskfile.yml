@@ -1,13 +1,53 @@
 version: "3"
 
 tasks:
+  build:
+    desc: Build the Jotter binary
+    vars:
+      BUILD_DIR: '{{.BUILD_DIR | default "build"}}'
+    cmds:
+      - mkdir -p {{.BUILD_DIR}}
+      - go build -o {{.BUILD_DIR}}/jotter cmd/jotter/main.go
+      - |
+        echo "Build completed successfully!"
+        echo "Binary: {{.BUILD_DIR}}/jotter"
+
+  test:
+    desc: Run all tests
+    cmds:
+      - go test ./...
+
+  test-single:
+    desc: Run a single test (specify TEST_NAME variable)
+    vars:
+      TEST_NAME: '{{.TEST_NAME | default "TestExample"}}'
+    cmds:
+      - go test -run ^{{.TEST_NAME}}$ ./cmd/jotter
+
+  bench:
+    desc: Run benchmarks
+    cmds:
+      - go test -bench . ./cmd/jotter
+
+  lint:
+    desc: Run Go vet linter
+    cmds:
+      - go vet ./...
+
+  fmt:
+    desc: Format Go code
+    cmds:
+      - gofmt -w .
+      - echo "Code formatted successfully!"
+
   gen-certs:
     desc: Generate self-signed TLS certificates for development
     vars:
       DOMAIN: '{{.DOMAIN | default "localhost"}}'
-      CERT_DIR: build/certs
-      CERT_FILE: build/certs/server.crt
-      KEY_FILE: build/certs/server.key
+      BUILD_DIR: '{{.BUILD_DIR | default "build"}}'
+      CERT_DIR: "{{.BUILD_DIR}}/certs"
+      CERT_FILE: "{{.BUILD_DIR}}/certs/server.crt"
+      KEY_FILE: "{{.BUILD_DIR}}/certs/server.key"
     cmds:
       - mkdir -p {{.CERT_DIR}}
       - |
