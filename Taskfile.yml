@@ -5,9 +5,9 @@ tasks:
     desc: Generate self-signed TLS certificates for development
     vars:
       DOMAIN: '{{.DOMAIN | default "localhost"}}'
-      CERT_DIR: certs
-      CERT_FILE: certs/server.crt
-      KEY_FILE: certs/server.key
+      CERT_DIR: build/certs
+      CERT_FILE: build/certs/server.crt
+      KEY_FILE: build/certs/server.key
     cmds:
       - mkdir -p {{.CERT_DIR}}
       - |

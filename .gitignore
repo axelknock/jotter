@@ -5,9 +5,5 @@ build/
 jots/
 *.txt
 
-# Generated tls certificates
-certs/
-
-# build
-jotter
-main
+# Crush directory
+.crush/

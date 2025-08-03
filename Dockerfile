@@ -10,7 +10,7 @@ RUN go mod download
 COPY . .
 
 # Build the application
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o jotter ./cmd/jotter
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o build/jotter ./cmd/jotter
 
 FROM alpine:latest
 
@@ -20,7 +20,7 @@ RUN apk --no-cache add ca-certificates openssl
 WORKDIR /app
 
 # Copy the binary from builder stage
-COPY --from=builder /app/jotter .
+COPY --from=builder /app/build/jotter .
 
 # Create directories for jots and certificates
 RUN mkdir -p /app/jots /app/certs
