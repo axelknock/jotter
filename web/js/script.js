@@ -69,7 +69,7 @@ function connectSSE() {
         const data = JSON.parse(event.data);
         if (data.type === "content_update" && data.writer !== getSessionId()) {
           const jotField = document.getElementById("jot-field");
-          jotField.innerText = data.content;
+          jotField.value = data.content;
         }
         // Heartbeat messages are handled by just resetting the timer above
       } catch (e) {
