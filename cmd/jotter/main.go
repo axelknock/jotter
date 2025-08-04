@@ -3,9 +3,9 @@ package main
 import (
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"html/template"
-	"io"
 	"log"
 	"net/http"
 	"os"
@@ -18,6 +18,7 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/google/uuid"
+	"github.com/starfederation/datastar-go/datastar"
 )
 
 const htmlTemplate = `<!doctype html>
@@ -28,14 +29,15 @@ const htmlTemplate = `<!doctype html>
         <title>jotter</title>
         <link rel="icon" type="image/x-icon" href="/static/img/favicon.ico" />
         <link rel="stylesheet" href="/static/css/style.css">
+        <script type="module" src="/static/js/datastar.js"></script>
     </head>
-    <body>
+    <body data-on-load="@get('/updates')">
         <textarea
             id="jot-field"
             placeholder="Start typing..."
-            oninput="handleInput()"
+            data-bind-content
+            data-on-input__debounce.500ms="@post('/write')"
         >{{.Content}}</textarea>
-        <script src="/static/js/script.js"></script>
     </body>
 </html>`
 
@@ -48,18 +50,12 @@ type Server struct {
 	keyFile    string
 	watcher    *fsnotify.Watcher
 	clients    map[string]map[string]chan []byte // token -> sessionId -> channel
-	lastWriter map[string]string                 // token -> sessionId
 	mu         sync.RWMutex
 	tmpl       *template.Template
 }
 
-type UpdateMessage struct {
-	Type    string `json:"type"`
-	Content string `json:"content"`
-	Writer  string `json:"writer"`
-}
-
-type WriteRequest struct {
+// JotAction is used to decode signals from datastar POST requests
+type JotAction struct {
 	Content string `json:"content"`
 }
 
@@ -98,7 +94,6 @@ func NewServer() (*Server, error) {
 		keyFile:    keyFile,
 		watcher:    watcher,
 		clients:    make(map[string]map[string]chan []byte),
-		lastWriter: make(map[string]string),
 		tmpl:       tmpl,
 	}, nil
 }
@@ -148,7 +143,6 @@ func (s *Server) handleFileChange(filename string) {
 	if !strings.HasPrefix(base, "jot_") || !strings.HasSuffix(base, ".txt") {
 		return
 	}
-
 	token := strings.TrimPrefix(strings.TrimSuffix(base, ".txt"), "jot_")
 
 	content, err := os.ReadFile(filename)
@@ -157,46 +151,49 @@ func (s *Server) handleFileChange(filename string) {
 		return
 	}
 
-	s.mu.RLock()
-	clients := s.clients[token]
-	lastWriter := s.lastWriter[token]
-	s.mu.RUnlock()
-
-	if clients == nil {
+	payload := map[string]any{
+		"datastar-patch-signals": map[string]any{
+			"content": string(content),
+		},
+	}
+	messageBytes, err := json.Marshal(payload)
+	if err != nil {
+		log.Printf("Error marshalling datastar payload: %v", err)
 		return
 	}
 
-	message := UpdateMessage{
-		Type:    "content_update",
-		Content: string(content),
-		Writer:  lastWriter,
-	}
+	sseMessage := fmt.Sprintf("data: %s\n\n", messageBytes)
 
-	s.broadcastToClients(clients, message, lastWriter)
+	s.mu.RLock()
+	clientsForToken := s.clients[token]
+	s.mu.RUnlock()
+
+	if clientsForToken != nil {
+		s.broadcastToClients(clientsForToken, []byte(sseMessage))
+	}
 }
 
-func (s *Server) broadcastToClients(clients map[string]chan []byte, message UpdateMessage, excludeSession string) {
-	messageBytes := s.formatSSEMessage(message)
-
-	for sessionId, ch := range clients {
-		if sessionId != excludeSession {
-			select {
-			case ch <- messageBytes:
-			default:
-				// Channel is full or closed, skip
-			}
+func (s *Server) broadcastToClients(clients map[string]chan []byte, message []byte) {
+	for _, ch := range clients {
+		select {
+		case ch <- message:
+		default:
+			// Channel is full or closed, skip
 		}
 	}
 }
 
-func (s *Server) formatSSEMessage(message UpdateMessage) []byte {
-	data := fmt.Sprintf(`{"type":"%s","content":%q,"writer":"%s"}`,
-		message.Type, message.Content, message.Writer)
-	return fmt.Appendf(nil, "data: %s\n\n", data)
-}
-
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
+		// Allow clean URLs like /<token> to be shared
+		if len(r.URL.Path) > 1 && !strings.Contains(r.URL.Path, ".") {
+			token := r.URL.Path[1:]
+			filename := filepath.Join(s.jotDir, fmt.Sprintf("jot_%s.txt", token))
+			if _, err := os.Stat(filename); err == nil {
+				http.Redirect(w, r, "/?token="+token, http.StatusSeeOther)
+				return
+			}
+		}
 		http.NotFound(w, r)
 		return
 	}
@@ -232,10 +229,21 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	})
 
 	w.Header().Set("Content-Type", "text/html")
+
+	jsonContent, err := json.Marshal(string(content))
+	if err != nil {
+		http.Error(w, "Failed to marshal content", http.StatusInternalServerError)
+		return
+	}
+
 	data := struct {
-		Content string
+		Content     string
+		ContentJSON template.JS
+		Token       string
 	}{
-		Content: string(content),
+		Content:     string(content),
+		ContentJSON: template.JS(jsonContent),
+		Token:       token,
 	}
 
 	if err := s.tmpl.Execute(w, data); err != nil {
@@ -250,30 +258,22 @@ func (s *Server) handleWrite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	token, err := s.getTokenFromRequest(r)
+	token, err := s.getValidToken(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	sessionId := r.Header.Get("X-Session-Id")
-	if sessionId == "" {
-		sessionId = uuid.New().String()
-	}
-
-	var req WriteRequest
-	if err := decodeJSON(r.Body, &req); err != nil {
-		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+	var action JotAction
+	if err := datastar.ReadSignals(r, &action); err != nil {
+		http.Error(w, "Invalid signals", http.StatusBadRequest)
 		return
 	}
 
 	filename := filepath.Join(s.jotDir, fmt.Sprintf("jot_%s.txt", token))
 
-	s.mu.Lock()
-	s.lastWriter[token] = sessionId
-	s.mu.Unlock()
-
-	if err := os.WriteFile(filename, []byte(req.Content), 0644); err != nil {
+	// The file watcher will detect the change and broadcast it.
+	if err := os.WriteFile(filename, []byte(action.Content), 0644); err != nil {
 		http.Error(w, "Failed to write file", http.StatusInternalServerError)
 		return
 	}
@@ -282,24 +282,18 @@ func (s *Server) handleWrite(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleUpdates(w http.ResponseWriter, r *http.Request) {
-	token, err := s.getTokenFromRequest(r)
+	token, err := s.getValidToken(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	sessionId := r.Header.Get("X-Session-Id")
-	if sessionId == "" {
-		sessionId = uuid.New().String()
-	}
+	sessionId := uuid.New().String()
 
-	// Set SSE headers
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
 
-	// Create channel for this client
 	clientChan := make(chan []byte, 10)
 
 	s.mu.Lock()
@@ -309,7 +303,6 @@ func (s *Server) handleUpdates(w http.ResponseWriter, r *http.Request) {
 	s.clients[token][sessionId] = clientChan
 	s.mu.Unlock()
 
-	// Clean up on disconnect
 	defer func() {
 		s.mu.Lock()
 		if s.clients[token] != nil {
@@ -322,22 +315,12 @@ func (s *Server) handleUpdates(w http.ResponseWriter, r *http.Request) {
 		close(clientChan)
 	}()
 
-	// Send initial connection message
-	initialMsg := UpdateMessage{
-		Type:    "connected",
-		Content: "",
-		Writer:  "",
-	}
-	initialBytes := s.formatSSEMessage(initialMsg)
-	if _, err := w.Write(initialBytes); err != nil {
-		return
-	}
+	fmt.Fprintf(w, "event: message\ndata: {\"message\": \"connected\"}\n\n")
 	if f, ok := w.(http.Flusher); ok {
 		f.Flush()
 	}
 
-	// Send keep-alive and handle client messages
-	ticker := time.NewTicker(5 * time.Second)
+	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
 
 	for {
@@ -352,16 +335,7 @@ func (s *Server) handleUpdates(w http.ResponseWriter, r *http.Request) {
 				f.Flush()
 			}
 		case <-ticker.C:
-			// Send keep-alive data message
-			keepAlive := UpdateMessage{
-				Type:    "heartbeat",
-				Content: "",
-				Writer:  "",
-			}
-			messageBytes := s.formatSSEMessage(keepAlive)
-			if _, err := w.Write(messageBytes); err != nil {
-				return
-			}
+			fmt.Fprintf(w, ": heartbeat\n\n")
 			if f, ok := w.(http.Flusher); ok {
 				f.Flush()
 			}
@@ -412,7 +386,6 @@ func (s *Server) handleNew(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getOrCreateToken(r *http.Request) (string, error) {
-	// Check URL parameter first
 	if token := r.URL.Query().Get("token"); token != "" {
 		filename := filepath.Join(s.jotDir, fmt.Sprintf("jot_%s.txt", token))
 		if _, err := os.Stat(filename); err == nil {
@@ -421,7 +394,6 @@ func (s *Server) getOrCreateToken(r *http.Request) (string, error) {
 		return "", fmt.Errorf("invalid token")
 	}
 
-	// Check cookie
 	if cookie, err := r.Cookie("token"); err == nil {
 		filename := filepath.Join(s.jotDir, fmt.Sprintf("jot_%s.txt", cookie.Value))
 		if _, err := os.Stat(filename); err == nil {
@@ -429,7 +401,6 @@ func (s *Server) getOrCreateToken(r *http.Request) (string, error) {
 		}
 	}
 
-	// Check if any jot files exist
 	files, err := filepath.Glob(filepath.Join(s.jotDir, "jot_*.txt"))
 	if err != nil {
 		return "", fmt.Errorf("failed to check existing files")
@@ -439,23 +410,35 @@ func (s *Server) getOrCreateToken(r *http.Request) (string, error) {
 		return "", fmt.Errorf("token required")
 	}
 
-	// No files exist, create new token
 	return s.generateToken()
 }
 
-func (s *Server) getTokenFromRequest(r *http.Request) (string, error) {
-	if cookie, err := r.Cookie("token"); err == nil {
-		return cookie.Value, nil
+func (s *Server) getValidToken(r *http.Request) (string, error) {
+	token := r.URL.Query().Get("token")
+	if token == "" {
+		cookie, err := r.Cookie("token")
+		if err != nil {
+			return "", fmt.Errorf("no token provided")
+		}
+		token = cookie.Value
 	}
-	return "", fmt.Errorf("no token found")
+
+	filename := filepath.Join(s.jotDir, fmt.Sprintf("jot_%s.txt", token))
+	if _, err := os.Stat(filename); os.IsNotExist(err) {
+		return "", fmt.Errorf("invalid token: %s", token)
+	} else if err != nil {
+		return "", fmt.Errorf("error checking token: %w", err)
+	}
+
+	return token, nil
 }
 
 func (s *Server) generateToken() (string, error) {
-	bytes := make([]byte, 32)
+	bytes := make([]byte, 16)
 	if _, err := rand.Read(bytes); err != nil {
-		return "", fmt.Errorf("failed to generate token")
+		return "", fmt.Errorf("failed to generate random token: %w", err)
 	}
-	return base64.URLEncoding.EncodeToString(bytes)[:32], nil
+	return base64.URLEncoding.EncodeToString(bytes), nil
 }
 
 func (s *Server) getDefaultContent(token string) string {
@@ -463,21 +446,22 @@ func (s *Server) getDefaultContent(token string) string {
 	if s.tlsEnabled {
 		scheme = "https"
 	}
+	baseURL := fmt.Sprintf("%s://%s:%s", scheme, s.host, s.port)
 
 	return fmt.Sprintf(`Welcome to jotter!
 
-Make sure to save the link below, it's the only way to access this jot (go to it once and it will show up in your browser's history):
+Make sure to save the link below, it's the only way to access this jot:
 
-%s://%s:%s/?token=%s
+%s/%s
 
 To create a new jot, visit:
 
-%s://%s:%s/new
+%s/new
 
 *CAUTION*: Creating a new jot in the same browser will switch to the new jot session. Make sure you save the token!
 
 If you want to "log out" of jotter, simply clear your browser's cookies.`,
-		scheme, s.host, s.port, token, scheme, s.host, s.port)
+		baseURL, token, baseURL)
 }
 
 func (s *Server) getDefaultContentWithBackReference(newToken, originalToken string) string {
@@ -485,63 +469,24 @@ func (s *Server) getDefaultContentWithBackReference(newToken, originalToken stri
 	if s.tlsEnabled {
 		scheme = "https"
 	}
+	baseURL := fmt.Sprintf("%s://%s:%s", scheme, s.host, s.port)
 
 	return fmt.Sprintf(`Welcome to jotter!
 
-This jot was created from: %s://%s:%s/?token=%s
+This jot was created from: %s/%s
 
-Make sure to save the link below, it's the only way to access this website:
+Make sure to save the link below, it's the only way to access this jot:
 
-%s://%s:%s/?token=%s
+%s/%s
 
 To create a new jot, visit:
 
-%s://%s:%s/new
+%s/new
 
 *CAUTION*: Creating a new jot in the same browser will switch to the new jot session. Make sure you save the token!
 
 If you want to "log out" of jotter, simply clear your browser's cookies.`,
-		scheme, s.host, s.port, originalToken, scheme, s.host, s.port, newToken, scheme, s.host, s.port)
-}
-
-func decodeJSON(r io.Reader, v any) error {
-	// Simple JSON decoder for WriteRequest
-	body, err := io.ReadAll(r)
-	if err != nil {
-		return err
-	}
-
-	// Basic JSON parsing for our simple struct
-	str := string(body)
-	if !strings.Contains(str, `"content"`) {
-		return fmt.Errorf("missing content field")
-	}
-
-	// Extract content value (simple approach for this specific case)
-	start := strings.Index(str, `"content":"`) + 11
-	if start < 11 {
-		return fmt.Errorf("invalid JSON format")
-	}
-
-	end := strings.LastIndex(str, `"`)
-	if end <= start {
-		return fmt.Errorf("invalid JSON format")
-	}
-
-	content := str[start:end]
-	// Unescape basic JSON escapes
-	content = strings.ReplaceAll(content, `\"`, `"`)
-	content = strings.ReplaceAll(content, `\\`, `\`)
-	content = strings.ReplaceAll(content, `\n`, "\n")
-	content = strings.ReplaceAll(content, `\r`, "\r")
-	content = strings.ReplaceAll(content, `\t`, "\t")
-
-	if req, ok := v.(*WriteRequest); ok {
-		req.Content = content
-		return nil
-	}
-
-	return fmt.Errorf("unsupported type")
+		baseURL, originalToken, baseURL, newToken, baseURL)
 }
 
 func getEnv(key, defaultValue string) string {
