@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
@@ -9,9 +10,12 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"jotter/web"
@@ -41,6 +45,9 @@ const htmlTemplate = `<!doctype html>
     </body>
 </html>`
 
+// tokenRe validates the format of a token to prevent path traversal.
+var tokenRe = regexp.MustCompile(`^[A-Za-z0-9_-]+=*$`)
+
 type Server struct {
 	jotDir     string
 	host       string
@@ -49,6 +56,7 @@ type Server struct {
 	certFile   string
 	keyFile    string
 	watcher    *fsnotify.Watcher
+	httpServer *http.Server
 	clients    map[string]map[string]chan []byte // token -> sessionId -> channel
 	mu         sync.RWMutex
 	tmpl       *template.Template
@@ -77,11 +85,13 @@ func NewServer() (*Server, error) {
 	}
 
 	if err := watcher.Add(jotDir); err != nil {
+		watcher.Close()
 		return nil, fmt.Errorf("failed to watch directory: %w", err)
 	}
 
 	tmpl, err := template.New("index").Parse(htmlTemplate)
 	if err != nil {
+		watcher.Close()
 		return nil, fmt.Errorf("failed to parse template: %w", err)
 	}
 
@@ -109,17 +119,22 @@ func (s *Server) Start() error {
 	mux.Handle("/static/", web.StaticHandler())
 
 	addr := fmt.Sprintf("%s:%s", s.host, s.port)
+	s.httpServer = &http.Server{
+		Addr:    addr,
+		Handler: mux,
+	}
 
 	if s.tlsEnabled {
 		log.Printf("Starting TLS server on https://%s", addr)
-		return http.ListenAndServeTLS(addr, s.certFile, s.keyFile, mux)
+		return s.httpServer.ListenAndServeTLS(s.certFile, s.keyFile)
 	} else {
 		log.Printf("Starting server on http://%s", addr)
-		return http.ListenAndServe(addr, mux)
+		return s.httpServer.ListenAndServe()
 	}
 }
 
 func (s *Server) watchFiles() {
+	defer s.watcher.Close()
 	for {
 		select {
 		case event, ok := <-s.watcher.Events:
@@ -165,8 +180,8 @@ func (s *Server) handleFileChange(filename string) {
 	sseMessage := fmt.Sprintf("data: %s\n\n", messageBytes)
 
 	s.mu.RLock()
+	defer s.mu.RUnlock()
 	clientsForToken := s.clients[token]
-	s.mu.RUnlock()
 
 	if clientsForToken != nil {
 		s.broadcastToClients(clientsForToken, []byte(sseMessage))
@@ -293,6 +308,7 @@ func (s *Server) handleUpdates(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
 
 	clientChan := make(chan []byte, 10)
 
@@ -387,6 +403,9 @@ func (s *Server) handleNew(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) getOrCreateToken(r *http.Request) (string, error) {
 	if token := r.URL.Query().Get("token"); token != "" {
+		if !tokenRe.MatchString(token) {
+			return "", fmt.Errorf("invalid token format")
+		}
 		filename := filepath.Join(s.jotDir, fmt.Sprintf("jot_%s.txt", token))
 		if _, err := os.Stat(filename); err == nil {
 			return token, nil
@@ -395,15 +414,17 @@ func (s *Server) getOrCreateToken(r *http.Request) (string, error) {
 	}
 
 	if cookie, err := r.Cookie("token"); err == nil {
-		filename := filepath.Join(s.jotDir, fmt.Sprintf("jot_%s.txt", cookie.Value))
-		if _, err := os.Stat(filename); err == nil {
-			return cookie.Value, nil
+		if tokenRe.MatchString(cookie.Value) {
+			filename := filepath.Join(s.jotDir, fmt.Sprintf("jot_%s.txt", cookie.Value))
+			if _, err := os.Stat(filename); err == nil {
+				return cookie.Value, nil
+			}
 		}
 	}
 
 	files, err := filepath.Glob(filepath.Join(s.jotDir, "jot_*.txt"))
 	if err != nil {
-		return "", fmt.Errorf("failed to check existing files")
+		return "", fmt.Errorf("failed to check existing files: %w", err)
 	}
 
 	if len(files) > 0 {
@@ -421,6 +442,10 @@ func (s *Server) getValidToken(r *http.Request) (string, error) {
 			return "", fmt.Errorf("no token provided")
 		}
 		token = cookie.Value
+	}
+
+	if !tokenRe.MatchString(token) {
+		return "", fmt.Errorf("invalid token format: %s", token)
 	}
 
 	filename := filepath.Join(s.jotDir, fmt.Sprintf("jot_%s.txt", token))
@@ -442,10 +467,7 @@ func (s *Server) generateToken() (string, error) {
 }
 
 func (s *Server) getDefaultContent(token string) string {
-	scheme := "http"
-	if s.tlsEnabled {
-		scheme = "https"
-	}
+	scheme := "https"
 	baseURL := fmt.Sprintf("%s://%s:%s", scheme, s.host, s.port)
 
 	return fmt.Sprintf(`Welcome to jotter!
@@ -465,10 +487,7 @@ If you want to "log out" of jotter, simply clear your browser's cookies.`,
 }
 
 func (s *Server) getDefaultContentWithBackReference(newToken, originalToken string) string {
-	scheme := "http"
-	if s.tlsEnabled {
-		scheme = "https"
-	}
+	scheme := "https"
 	baseURL := fmt.Sprintf("%s://%s:%s", scheme, s.host, s.port)
 
 	return fmt.Sprintf(`Welcome to jotter!
@@ -502,7 +521,25 @@ func main() {
 		log.Fatalf("Failed to create server: %v", err)
 	}
 
-	if err := server.Start(); err != nil {
-		log.Fatalf("Server failed: %v", err)
+	go func() {
+		if err := server.Start(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("Server failed: %v", err)
+		}
+	}()
+
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+	log.Println("Shutting down server...")
+
+	// The watcher is closed automatically when its goroutine returns.
+	// No need to close it here explicitly unless we add a separate shutdown method.
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := server.httpServer.Shutdown(ctx); err != nil {
+		log.Fatalf("Server shutdown failed: %v", err)
 	}
+
+	log.Println("Server exiting")
 }
