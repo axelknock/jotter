@@ -73,12 +73,20 @@ tasks:
       JOT_HOST: localhost
       JOT_PORT: 8443
       JOT_DIR: jots
+      JOT_CERT_FILE: "{{.BUILD_DIR}}/certs/server.crt"
+      JOT_KEY_FILE: "{{.BUILD_DIR}}/certs/server.key"
     cmds:
       - |
-        export JOT_CERT_FILE="$(pwd)/{{.BUILD_DIR}}/certs/server.crt"
-        export JOT_KEY_FILE="$(pwd)/{{.BUILD_DIR}}/certs/server.key"
+        # Determine URL, appending token if one exists
+        URL="https://localhost:8443"
+        JOT_FILE=$(find jots -name "jot_*.txt" -print -quit)
+        if [ -n "$JOT_FILE" ]; then
+          TOKEN=$(basename "$JOT_FILE" .txt | sed 's/^jot_//')
+          URL="$URL?token=$TOKEN"
+        fi
+
         echo "Starting Jotter development server with auto-reload and TLS..."
-        echo "Server will be available at: https://localhost:8443"
+        echo "Server will be available at: $URL"
         echo "Note: You may need to accept the self-signed certificate warning in your browser"
         echo "Auto-reload is enabled - the server will restart when Go files change"
 
@@ -91,8 +99,8 @@ tasks:
 
         # Open browser if CHROME_BIN is set
         if [ -n "$CHROME_BIN" ]; then
-          echo "Opening browser at https://localhost:8443"
-          "$CHROME_BIN" "https://localhost:8443" 2>/dev/null &
+          echo "Opening browser at $URL"
+          "$CHROME_BIN" "$URL" 2>/dev/null &
         else
           echo "Set CHROME_BIN environment variable to automatically open browser"
         fi

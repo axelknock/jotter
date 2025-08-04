@@ -181,9 +181,7 @@ func (s *Server) handleFileChange(filename string) {
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	clientsForToken := s.clients[token]
-
-	if clientsForToken != nil {
+	if clientsForToken, ok := s.clients[token]; ok {
 		s.broadcastToClients(clientsForToken, []byte(sseMessage))
 	}
 }
@@ -203,6 +201,10 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		// Allow clean URLs like /<token> to be shared
 		if len(r.URL.Path) > 1 && !strings.Contains(r.URL.Path, ".") {
 			token := r.URL.Path[1:]
+			if !tokenRe.MatchString(token) {
+				http.NotFound(w, r)
+				return
+			}
 			filename := filepath.Join(s.jotDir, fmt.Sprintf("jot_%s.txt", token))
 			if _, err := os.Stat(filename); err == nil {
 				http.Redirect(w, r, "/?token="+token, http.StatusSeeOther)
@@ -463,11 +465,15 @@ func (s *Server) generateToken() (string, error) {
 	if _, err := rand.Read(bytes); err != nil {
 		return "", fmt.Errorf("failed to generate random token: %w", err)
 	}
-	return base64.URLEncoding.EncodeToString(bytes), nil
+	// Use RawURLEncoding to get a string without padding
+	return base64.RawURLEncoding.EncodeToString(bytes), nil
 }
 
 func (s *Server) getDefaultContent(token string) string {
-	scheme := "https"
+	scheme := "http"
+	if s.tlsEnabled {
+		scheme = "https"
+	}
 	baseURL := fmt.Sprintf("%s://%s:%s", scheme, s.host, s.port)
 
 	return fmt.Sprintf(`Welcome to jotter!
@@ -487,7 +493,10 @@ If you want to "log out" of jotter, simply clear your browser's cookies.`,
 }
 
 func (s *Server) getDefaultContentWithBackReference(newToken, originalToken string) string {
-	scheme := "https"
+	scheme := "http"
+	if s.tlsEnabled {
+		scheme = "https"
+	}
 	baseURL := fmt.Sprintf("%s://%s:%s", scheme, s.host, s.port)
 
 	return fmt.Sprintf(`Welcome to jotter!
@@ -531,9 +540,6 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 	log.Println("Shutting down server...")
-
-	// The watcher is closed automatically when its goroutine returns.
-	// No need to close it here explicitly unless we add a separate shutdown method.
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
