@@ -17,7 +17,9 @@
           
           src = ./.;
           
-          vendorHash = "sha256-yI1G4wCVoa0sBzNDxxo+8NPcB7v9NqgqsJS+9xF//Rg=";
+          vendorHash = "sha256-6zLJqh7dxD6N6RqY36Gb61jLWSuHqMR5uCEENzk1zEU=";
+
+          modVendor = true;
           
           buildFlags = [ "-mod=readonly" ];
           
