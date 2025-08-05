@@ -29,3 +29,7 @@
 - web/: Embedded static assets and handler.
 - jots/: Runtime directory for note files (gitignored).
 - certs/: Generated certificates (gitignored).
+
+## Instruction Following
+
+Do not go off the rails and complete tasks not assigned. If there is a task that is implicitly linked to the completion of one of your primary tasks (such as writing tests for code you write), you can complete it, but otherwise only suggest follow-on tasks to the user without taking it upon yourself to embark on them.
